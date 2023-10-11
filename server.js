@@ -15,6 +15,8 @@ const DB_USER = process.env.USER;
 const DB_PASSWORD = process.env.PASS;
 const DB_HOST = process.env.HOST;
 const DB_PORT = process.env.PORT;
+const JWT_KEY = process.env.JWT_KEY;
+const MAIL_PASS = process.env.MAIL_PASS;
 
 
 const app = express();
@@ -76,17 +78,39 @@ const verifyUser = (req, res, next) => {
     jwt.verify(token, process.env.JWT_KEY, (err, result) => {
         if (err) return res.json({ Error: 'token is not okey' });
         req.name = result.name;
+        req.verified = result.verified;
         next();
     });
 };
 
+// const verifiedEmail = (req, res, next) => {
+//     const token = req.cookies.token;
+//     if (!token) return res.json({ Error: 'Access Denied' });
+//     jwt.verify(token, process.env.JWT_KEY, (err, result) => {
+//         if (err) return res.json({ Error: 'token is not okey' });
+//         req.name = result.name;
+//         const query = {
+//             text: 'SELECT * FROM users WHERE email = $1',
+//             values: [result.email]
+//         };
+//         Pool.query(query, (err, result) => {
+//             if (err) return res.status(500).json({ Error: err });
+//             if (result.rows[0].verified) {
+//                 next();
+//             } else {
+//                 return res.json({ Error: 'Email not verified' });
+//             }
+//         });
+//     });
+// };
+
 
 // Routes
 
-//home route
+// home route
 
 app.get('/', verifyUser, (req, res) => {
-    return res.json({ Status: 'Success', name: req.name });
+    return res.json({ Status: 'Success', name: req.name, verified: req.verified });
 });
 
 app.get('/login', verifyUser, (req, res) => {
@@ -97,8 +121,7 @@ app.get('/register', verifyUser, (req, res) => {
     return res.json({ Status: 'Success', name: req.name });
 })
 
-
-//register route
+// register route
 
 app.post('/api/register', (req, res) => {
 
@@ -109,19 +132,73 @@ app.post('/api/register', (req, res) => {
         const values = [todayDate , req.body.name, req.body.email, hash];
 
         const query = {
-            text: 'INSERT INTO users(last_login, name, email, password) VALUES($1, $2, $3, $4)',
+            text: 'INSERT INTO users(last_login, name, email, password, verified) VALUES($1, $2, $3, $4, false)',
             values: values
         };
 
         Pool.query(query, (err, result) => {
-            if (err) return res.status(500).json({ Error: err });
-            return res.status(200).json({ Status: 'Success' });
+            if (err) {
+                return res.status(500).json({ Error: err });
+            }
+
+            const token = jwt.sign({ name: req.body.name, email: req.body.email }, process.env.JWT_KEY, { expiresIn: '1d' });
+            const transporter = nodemailer.createTransport({
+                service: 'gmail',
+                host: "smtp.gmail.com",
+                port: 587,
+                secure: false,
+                auth: {
+                    user: 'noureddine.api@gmail.com',
+                    pass: MAIL_PASS
+                }
+            });
+
+            var mailOptions = {
+                from: 'noureddine.api@gmail.com',
+                to: req.body.email,
+                subject: 'Email Verification',
+                text: `http://localhost:3000/api/verify/${req.body.email}/${token}`
+            };
+
+            transporter.sendMail(mailOptions, (error, info) => {
+                if (error) {
+                    const query_delete = {
+                        text: 'DELETE FROM users WHERE email = $1',
+                        values: [req.body.email]
+                    };
+                    Pool.query(query_delete, (err, result) => {
+                        if (err) return res.status(500).json({ Error: err });
+                    });
+                    return res.status(500).json({ Error: error });
+                } else {
+                    return res.status(200).json({ Status: 'Success' });
+
+                }
+            });
         })
     });
 
 });
 
-//login route
+
+// email verification route
+
+app.get('/api/verify/:email/:token', (req, res) => {
+    const { email, token } = req.params;
+    jwt.verify(token, process.env.JWT_KEY, (err, decoded) => {
+        if (err) return res.json({ Error: 'token is not okey' });
+        const query = {
+            text: 'UPDATE users SET verified = $1 WHERE email = $2',
+            values: [true, email]
+        };
+        Pool.query(query, (err, result) => {
+            if (err) return res.status(500).json({ Error: err });
+            return res.status(200).json({ Status: 'Success' });
+        });
+    });
+});
+
+// login route
 
 app.post('/api/login', (req, res) => {
     //querry database for email
@@ -141,7 +218,8 @@ app.post('/api/login', (req, res) => {
             if (response) {
                 const name = result.rows[0].name;
                 const email = result.rows[0].email;
-                const token = jwt.sign({ name, email }, process.env.JWT_KEY, { expiresIn: '1d' }); //create token for cookie
+                const verified = result.rows[0].verified;
+                const token = jwt.sign({ name, email, verified }, process.env.JWT_KEY, { expiresIn: '1d' }); //create token for cookie
                 res.cookie('token', token); //set cookie
                 const date = new Date().toISOString().slice(0, 10);
                 values = [date, email];
@@ -199,7 +277,6 @@ app.post('/forgot-password', (req, res) => {
         values: [email]
     }
     Pool.query(query, (err, result) => {
-        console.log(result.length);
         if(err) {
             return res.send({Status: "User not existed"})
         }
@@ -214,9 +291,9 @@ app.post('/forgot-password', (req, res) => {
             secure: false,
             auth: {
               user: 'noureddine.api@gmail.com',
-              pass: 'jdmgfgjsanlphqlv'
+              pass: MAIL_PASS
             }
-          });
+        });
           
           var mailOptions = {
             from: 'noureddine.api@gmail.com',
@@ -227,7 +304,7 @@ app.post('/forgot-password', (req, res) => {
           
           transporter.sendMail(mailOptions, function(error, info){
             if (error) {
-              console.log(error);
+                return res.send({Status: "Error with sending email"})
             } else {
               return res.send({Status: "Success"})
             }
@@ -235,7 +312,7 @@ app.post('/forgot-password', (req, res) => {
     })
 })
 
-//reset password route
+// reset password route
 
 app.post('/reset-password/:email/:token', (req, res) => {
     const {email, token} = req.params
